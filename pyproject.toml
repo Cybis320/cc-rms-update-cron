@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rms_update_cron"
+version = "1.0.0"
+description = "Pick and install the best daily cron time to update/restart RMS, from the station's coordinates"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "ContrailCast"}]
+keywords = ["rms", "meteor", "cron", "ephem", "sunrise", "sunset"]
+requires-python = ">=3.9"
+dependencies = ["ephem>=4"]
+
+[project.scripts]
+rms-update-cron = "rms_update_cron.__main__:main"
+
+[tool.setuptools]
+packages = ["rms_update_cron"]
