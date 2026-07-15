@@ -143,15 +143,22 @@ def local_tz():
 # --------------------------------------------------------------------------- #
 def scan_days(lat, lon, elev, horizon, dates, tz):
     """
-    For each date in `dates`, find (in local time, as hours-since-local-midnight):
-      - morning capture-end   = Sun rising past the horizon before local noon
-      - evening capture-start = Sun setting past the horizon after local noon
-    Evening values can exceed 24 (past midnight) so they stay comparable.
+    For each date in `dates`, find the daytime gap (no capture) that brackets that
+    day's solar transit, expressed in local hours-since-local-midnight:
+      - morning capture-end   = Sun rising past the horizon (dawn), before transit
+      - evening capture-start = Sun setting past the horizon (dusk), after transit
+
+    Anchoring on the Sun's transit -- not on clock noon -- is what makes this correct
+    at any longitude/timezone. When the system clock is far from the station's
+    longitude (e.g. a UTC box at lon +168), the daytime gap can straddle local
+    midnight, so dawn may be negative and dusk may exceed 24; both are kept on a
+    single continuous axis (globally unwrapped against the first day's transit) so
+    the year-wide max/min never see a false 24h jump.
 
     Polar days count two ways, because they mean opposite things:
       - polar_day   (Sun never drops below horizon): no capture -> any time safe
       - polar_night (Sun never rises above horizon): capture runs 24h -> no gap
-    Returns (latest_morning_end, earliest_evening_start, n_polar_day, n_polar_night),
+    Returns (latest_dawn, earliest_dusk, n_polar_day, n_polar_night),
     each of the first two a (hours, date) tuple or None.
     """
     obs = ephem.Observer()
@@ -164,14 +171,16 @@ def scan_days(lat, lon, elev, horizon, dates, tz):
     earliest_evening = None
     polar_day = 0
     polar_night = 0
+    ref_transit_h = None  # first day's transit offset, for global unwrap
 
     for day in dates:
         midnight = datetime.datetime(day.year, day.month, day.day, tzinfo=tz)
-        noon_local = midnight + datetime.timedelta(hours=12)
-        obs.date = noon_local.astimezone(UTC).replace(tzinfo=None)
+        obs.date = midnight.astimezone(UTC).replace(tzinfo=None)
+        transit = obs.next_transit(sun)      # this day's solar noon (always exists)
+        obs.date = transit
         try:
-            rise = obs.previous_rising(sun).datetime().replace(tzinfo=UTC)
-            sett = obs.next_setting(sun).datetime().replace(tzinfo=UTC)
+            dawn = obs.previous_rising(sun).datetime().replace(tzinfo=UTC)
+            dusk = obs.next_setting(sun).datetime().replace(tzinfo=UTC)
         except ephem.AlwaysUpError:
             polar_day += 1
             continue
@@ -179,12 +188,24 @@ def scan_days(lat, lon, elev, horizon, dates, tz):
             polar_night += 1
             continue
 
-        rise_h = (rise.astimezone(tz) - midnight).total_seconds() / 3600.0
-        set_h = (sett.astimezone(tz) - midnight).total_seconds() / 3600.0
-        if latest_morning is None or rise_h > latest_morning[0]:
-            latest_morning = (rise_h, day)
-        if earliest_evening is None or set_h < earliest_evening[0]:
-            earliest_evening = (set_h, day)
+        transit_dt = transit.datetime().replace(tzinfo=UTC)
+        transit_h = (transit_dt.astimezone(tz) - midnight).total_seconds() / 3600.0
+        dawn_h = (dawn.astimezone(tz) - midnight).total_seconds() / 3600.0
+        dusk_h = (dusk.astimezone(tz) - midnight).total_seconds() / 3600.0
+
+        # Keep every day on one continuous axis: if this day's transit sits a whole
+        # revolution off the reference (solar noon near local midnight), shift the
+        # whole dawn/dusk triple back in line.
+        if ref_transit_h is None:
+            ref_transit_h = transit_h
+        k = round((transit_h - ref_transit_h) / 24.0)
+        dawn_h -= 24.0 * k
+        dusk_h -= 24.0 * k
+
+        if latest_morning is None or dawn_h > latest_morning[0]:
+            latest_morning = (dawn_h, day)
+        if earliest_evening is None or dusk_h < earliest_evening[0]:
+            earliest_evening = (dusk_h, day)
 
     return latest_morning, earliest_evening, polar_day, polar_night
 
@@ -205,7 +226,10 @@ def horizon_dates(tz, n_days):
 def decide_hour(morning, evening, proc, buf, polar_day, polar_night):
     """
     Return (best_hour_or_None, floor, ceil, reason).
-    best is the latest whole hour that fits [floor, ceil]; None means no safe hour.
+    best is the latest whole clock hour (0-23) that fits the daytime window
+    [dawn+proc, dusk-buffer]; None means no safe hour. The window is on the
+    continuous (possibly negative / >24) axis from scan_days; the returned hour
+    is wrapped back into 0-23, since a cron hour is a wall-clock hour.
     """
     if morning is None and evening is None:
         if polar_night and not polar_day:
@@ -217,21 +241,18 @@ def decide_hour(morning, evening, proc, buf, polar_day, polar_night):
         return None, None, None, "incomplete day/night cycle in range"
     floor = morning[0] + proc
     ceil = evening[0] - buf
-    best = int(math.floor(ceil))
     if polar_night:
         return None, floor, ceil, "polar night in range (continuous capture)"
-    if floor <= best <= ceil and 0 <= best <= 23:
-        return best, floor, ceil, "ok"
+    best = int(math.floor(ceil))       # latest whole hour on the continuous axis
+    if floor <= best <= ceil:
+        return best % 24, floor, ceil, "ok"
     return None, floor, ceil, "window too narrow for a whole hour"
 
 
 def fmt_h(hours):
-    """Format hours-since-midnight (may be >24) as HH:MM."""
-    h = int(hours) % 24
-    m = int(round((hours - int(hours)) * 60))
-    if m == 60:
-        h, m = (h + 1) % 24, 0
-    return "%02d:%02d" % (h, m)
+    """Format an offset in hours (may be negative or >24) as a HH:MM wall clock."""
+    total = int(round(hours * 60)) % (24 * 60)
+    return "%02d:%02d" % (total // 60, total % 60)
 
 
 # --------------------------------------------------------------------------- #
@@ -438,9 +459,11 @@ def main():
               % (fmt_h(evening[0]), evening[1], args.presunset_buffer, fmt_h(ceil)))
 
     if best is not None:
+        # ceil/floor are on the continuous axis; use the un-wrapped hour for the margins.
+        best_unwrapped = int(math.floor(ceil))
         print("\nRecommended update hour: %02d:00 %s  (%.1fh after latest sunrise-end, "
               "%.1fh before earliest capture start)"
-              % (best, tzname, best - morning[0], evening[0] - best))
+              % (best, tzname, best_unwrapped - morning[0], evening[0] - best_unwrapped))
         print("\nCron line:\n  %s" % active_cron_line(best, args.command))
         if args.install:
             install_static(args, best)
