@@ -7,22 +7,28 @@ never collides with capture or morning processing.
 ## Install (one command)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Cybis320/cc-rms-update-cron/master/scripts/deploy.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Cybis320/cc-rms-update-cron/master/install.sh | bash
 ```
 
 Clones (or updates) the repo into `~/source/CC_Utils/rms_update_cron`, installs
 the package into the RMS virtualenv at `~/vRMS` (or a local `.venv` if there
 isn't one), and runs `rms-update-cron --install` to set the cron job. Idempotent —
-re-run any time to update.
+re-run any time.
 
-Set `CC_NO_INSTALL=1` to install the package but **not** touch your crontab:
+Updates install themselves: the installer schedules the shared hourly
+[cc-utils](cc-utils/README.md) updater (one crontab line, tagged
+`# cc-utils-update`). The older one-liner that curled `scripts/deploy.sh` still
+works.
+
+Set `CC_NO_INSTALL=1` to install the package but **not** touch your crontab
+(this also skips scheduling the auto-updater):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Cybis320/cc-rms-update-cron/master/scripts/deploy.sh | CC_NO_INSTALL=1 bash
+curl -fsSL https://raw.githubusercontent.com/Cybis320/cc-rms-update-cron/master/install.sh | CC_NO_INSTALL=1 bash
 ```
 
 Other overrides: `CC_DEST` (checkout location), `CC_VENV` (virtualenv),
-`CC_REPO_URL`.
+`CC_REPO_URL`, `CC_NO_AUTOUPDATE=1`.
 
 ## What it does
 
